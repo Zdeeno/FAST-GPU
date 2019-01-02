@@ -1,5 +1,6 @@
 #include "cuda.cuh"
 
+
 __device__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold) {
 	/// very similar to get_score, only returns -1,0,1
 	if (circle_val > (pixel_val + threshold)) {
@@ -49,7 +50,7 @@ __host__ void fill_const_mem(int *h_circle, int *h_mask) {
 	return;
 }
 
-__global__ void FAST_global(unsigned char *input, unsigned int *output, int width, int height, int threshold, int pi)
+__global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned char *corner_bools, int width, int height, int threshold, int pi)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int idy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -99,7 +100,8 @@ __global__ void FAST_global(unsigned char *input, unsigned int *output, int widt
 		max_score = score_sum;
 	}
 	if (corner) {
-		output[id1d] = (unsigned int)max_score;
+		scores[id1d] = (unsigned int)max_score;
+		corner_bools[id1d] = 1;
 	}
 	else {
 		return;
@@ -108,23 +110,25 @@ __global__ void FAST_global(unsigned char *input, unsigned int *output, int widt
 	/// non-maximal suppresion
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 	{
-		if (output[id1d + d_mask[i]] > max_score) {
+		if (scores[id1d + d_mask[i]] > max_score) {
 			return;
 		}
 	}
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
 	{
 		if (d_mask[i]) {
-			output[id1d + d_mask[i]] = 0;
+			scores[id1d + d_mask[i]] = 0;
+			corner_bools[id1d + d_mask[i]] = 0;
 		}
 	}
 	return;
 }
 
 
-__global__ void FAST_shared(unsigned char *input, unsigned int *output, int width, int height, int threshold, int pi)
+__global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned char *corner_bools, int width, int height, int threshold, int pi)
 {
 	extern __shared__ unsigned char sData[];
+	int max_score = 0;	/// final score of corner in particular thread
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int idy = blockIdx.y * blockDim.y + threadIdx.y;
 	/// get 1d coordinates and cutout borders
@@ -142,70 +146,119 @@ __global__ void FAST_shared(unsigned char *input, unsigned int *output, int widt
 		sData[index1] = input[coords_2to1(global_x1, global_y1, width, height, false)];
 		sData[index2] = input[coords_2to1(global_x2, global_y2, width, height, false)];
 	}
-	if (id1d == -1) {
-		return;
-	}
-	__syncthreads();
-	/// fast test
-	int s_id1d = coords_2to1(threadIdx.x + PADDING, threadIdx.y + PADDING, shared_width, shared_width, false);
-	unsigned char pixel = sData[s_id1d];
-	char top = comparator(pixel, sData[s_id1d + d_circle[0]], threshold);
-	char down = comparator(pixel, sData[s_id1d + d_circle[8]], threshold);
-	char right = comparator(pixel, sData[s_id1d + d_circle[4]], threshold);
-	char left = comparator(pixel, sData[s_id1d + d_circle[12]], threshold);
-	if (abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2)) {
-		return;
-	}
-	/// make complex test and calculate score
-	char score;
-	int score_sum = 0;
-	int max_score = 0;
-	char val;
-	char last_val = -2;
-	unsigned char consecutive = 0;
-	bool corner = false;
-	for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) // iterate over whole circle
-	{
-		if (consecutive >= 12) {
-			corner = true;
-		}
-		score = get_score(pixel, sData[s_id1d + d_circle[i % CIRCLE_SIZE]], threshold);
-		val = (score < 0) ? -1 : (score > 0);  // signum
-		if (val == last_val) {
-			consecutive++;
-			score_sum += abs(score);
-		}
-		else {
+	if (id1d != -1) {
+
+		__syncthreads();
+		/// fast test
+		int s_id1d = coords_2to1(threadIdx.x + PADDING, threadIdx.y + PADDING, shared_width, shared_width, false);
+		unsigned char pixel = sData[s_id1d];
+		char top = comparator(pixel, sData[s_id1d + d_circle[0]], threshold);
+		char down = comparator(pixel, sData[s_id1d + d_circle[8]], threshold);
+		char right = comparator(pixel, sData[s_id1d + d_circle[4]], threshold);
+		char left = comparator(pixel, sData[s_id1d + d_circle[12]], threshold);
+		if (!(abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2))) { /// exclude a lot of pixels
+
+			/// make complex test and calculate score
+			char score;
+			int score_sum = 0;
+			char val;
+			char last_val = -2;
+			unsigned char consecutive = 0;
+			bool corner = false;
+			for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) // iterate over whole circle
+			{
+				if (consecutive >= 12) {
+					corner = true;
+				}
+				score = get_score(pixel, sData[s_id1d + d_circle[i % CIRCLE_SIZE]], threshold);
+				val = (score < 0) ? -1 : (score > 0);  // signum
+				if (val == last_val) {
+					consecutive++;
+					score_sum += abs(score);
+				}
+				else {
+					if (score_sum > max_score) {
+						max_score = score_sum;
+					}
+					consecutive = 1;
+					score_sum = abs(score);
+				}
+				last_val = val;
+			}
 			if (score_sum > max_score) {
 				max_score = score_sum;
 			}
-			consecutive = 1;
-			score_sum = abs(score);
+			if (corner) {
+				scores[id1d] = (unsigned int)max_score;
+			}
+			else {
+				return;
+			}
 		}
-		last_val = val;
-	}
-	if (score_sum > max_score) {
-		max_score = score_sum;
-	}
-	if (corner) {
-		output[id1d] = (unsigned int)max_score;
-	}
-	else {
-		return;
 	}
 	__syncthreads();
-	/// non-maximal suppresion (very time consuming)
-	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
-	{
-		if (output[id1d + d_mask[i]] > max_score) {
-			return;
+
+	if (max_score > 0) {
+		/// non-maximal suppresion (very time consuming)
+		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
+		{
+			if (scores[id1d + d_mask[i]] > max_score) {
+				return;
+			}
 		}
-	}
-	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
-	{
-		if (d_mask[i]) {
-			output[id1d + d_mask[i]] = 0;
+		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
+		{
+			if (d_mask[i]) {
+				scores[id1d + d_mask[i]] = 0;
+			}
 		}
 	}
 	return;
+}
+
+__global__ void scan(unsigned* out, const unsigned* in, unsigned* sums, const unsigned n) {
+
+	unsigned int id = threadIdx.x;
+	unsigned int id_offset = n * blockIdx.x;
+	unsigned int offset = 1;
+
+	// shared memory:
+	extern __shared__ unsigned int shared[];
+	shared[2 * id] = in[id_offset + 2 * id];
+	shared[2 * id + 1] = in[id_offset + 2 * id + 1];
+
+	// upsweep
+	for (int i = n >> 1; i > 0; i = i >> 1)
+	{
+		__syncthreads();
+		if (id < i)
+		{
+			int a = offset * (2 * id + 1) - 1;
+			int b = offset * (2 * id + 2) - 1;
+			shared[b] += shared[a];
+		}
+		offset *= 2;
+	}
+	if (id == 0) {
+		if (sums) sums[blockIdx.x] = shared[n - 1];
+		shared[n - 1] = 0;
+	}
+
+	// downsweep
+	for (int i = 1; i < n; i *= 2)
+	{
+		offset = offset >> 1;
+		__syncthreads();
+		if (id < i)
+		{
+			int a = offset * (2 * id + 1) - 1;
+			int b = offset * (2 * id + 2) - 1;
+			float tmp = shared[a];
+			shared[a] = shared[b];
+			shared[b] += tmp;
+		}
+	}
+	__syncthreads();
+	out[id_offset + 2 * id] = shared[2 * id];
+	out[id_offset + 2 * id + 1] = shared[2 * id + 1];
 }
