@@ -50,7 +50,7 @@ __host__ void fill_const_mem(int *h_circle, int *h_mask) {
 	return;
 }
 
-__global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned char *corner_bools, int width, int height, int threshold, int pi)
+__global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	int idy = blockIdx.y * blockDim.y + threadIdx.y;
@@ -125,7 +125,7 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned cha
 }
 
 
-__global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned char *corner_bools, int width, int height, int threshold, int pi)
+__global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
 	extern __shared__ unsigned char sData[];
 	int max_score = 0;	/// final score of corner in particular thread
@@ -190,6 +190,7 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned cha
 			}
 			if (corner) {
 				scores[id1d] = (unsigned int)max_score;
+				corner_bools[id1d] = 1;
 			}
 			else {
 				return;
@@ -209,6 +210,7 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned cha
 		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
 		{
 			if (d_mask[i]) {
+				corner_bools[id1d + d_mask[i]] = 0;
 				scores[id1d + d_mask[i]] = 0;
 			}
 		}
@@ -216,49 +218,15 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned cha
 	return;
 }
 
-__global__ void scan(unsigned* out, const unsigned* in, unsigned* sums, const unsigned n) {
-
-	unsigned int id = threadIdx.x;
-	unsigned int id_offset = n * blockIdx.x;
-	unsigned int offset = 1;
-
-	// shared memory:
-	extern __shared__ unsigned int shared[];
-	shared[2 * id] = in[id_offset + 2 * id];
-	shared[2 * id + 1] = in[id_offset + 2 * id + 1];
-
-	// upsweep
-	for (int i = n >> 1; i > 0; i = i >> 1)
-	{
-		__syncthreads();
-		if (id < i)
-		{
-			int a = offset * (2 * id + 1) - 1;
-			int b = offset * (2 * id + 2) - 1;
-			shared[b] += shared[a];
-		}
-		offset *= 2;
-	}
-	if (id == 0) {
-		if (sums) sums[blockIdx.x] = shared[n - 1];
-		shared[n - 1] = 0;
-	}
-
-	// downsweep
-	for (int i = 1; i < n; i *= 2)
-	{
-		offset = offset >> 1;
-		__syncthreads();
-		if (id < i)
-		{
-			int a = offset * (2 * id + 1) - 1;
-			int b = offset * (2 * id + 2) - 1;
-			float tmp = shared[a];
-			shared[a] = shared[b];
-			shared[b] += tmp;
+__global__ void find_corners(unsigned *scanned_array, corner *result, unsigned *scores, int length, int width) {
+	unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx < length && idx > 1) {
+		int prev = idx - 1;
+		int val = scanned_array[idx];
+		if (scanned_array[prev] < scanned_array[idx]) {
+			result[val - 1].x = idx % width;
+			result[val - 1].y = idx / width;
+			result[val - 1].score = scores[idx];
 		}
 	}
-	__syncthreads();
-	out[id_offset + 2 * id] = shared[2 * id];
-	out[id_offset + 2 * id + 1] = shared[2 * id + 1];
 }

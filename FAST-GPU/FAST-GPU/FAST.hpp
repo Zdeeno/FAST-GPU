@@ -23,7 +23,7 @@
 
 /// argument parsing
 int threshold = 75;
-int mode = 1;
+int mode = 0;
 int pi = 12;
 char *filename = NULL;
 bool video = false;

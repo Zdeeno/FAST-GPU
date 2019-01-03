@@ -79,17 +79,8 @@ void parse_args(int argc, char **argv){
 	return;
 }
 
-int main(int argc, char **argv)
-{
-
-	parse_args(argc, argv);
-
-	/// load image
-	cv::Mat image;
-	image = cv::imread(filename, 0);
-	cv::Size size(768, 1024);
-	resize(image, image, size);
-
+void run_on_gpu(cv::Mat image) {
+	
 	/// get dimension of image
 	int width = image.cols;
 	int height = image.rows;
@@ -106,8 +97,8 @@ int main(int argc, char **argv)
 	/// allocate memory
 	h_img = (unsigned char*)malloc(char_size);
 	h_corner_bools = (unsigned char*)malloc(int_size);
-	h_circle = (int*)malloc(CIRCLE_SIZE*sizeof(int));
-	h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE*sizeof(int));
+	h_circle = (int*)malloc(CIRCLE_SIZE * sizeof(int));
+	h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
 	CHECK_ERROR(cudaMalloc((void**)&d_img, char_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_corner_bools, char_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
@@ -143,33 +134,44 @@ int main(int argc, char **argv)
 	}
 
 	/// create new CUDA array of corners with appropriate length
-	thrust::device_ptr<unsigned char> dev_corners(d_corner_bools);						/// 
-	thrust::inclusive_scan(dev_corners, dev_corners + length, dev_corners);		/// scanned values
+	thrust::device_ptr<unsigned> dev_bools(d_corner_bools);
+	thrust::inclusive_scan(dev_bools, dev_bools + length, dev_bools);		/// scanned values
 	unsigned number_of_corners;
-	d_corner_bools = thrust::raw_pointer_cast(dev_corners);
-	CHECK_ERROR(cudaMemcpy(&number_of_corners, &d_corner_bools[length - 1], sizeof(unsigned), cudaMemcpyDeviceToHost));
-	printf("number of corners: %d \n", number_of_corners);
+	d_corner_bools = thrust::raw_pointer_cast(&dev_bools[0]);						/// cast pointer
+	CHECK_ERROR(cudaMemcpy(&number_of_corners, &d_corner_bools[length - 1], sizeof(unsigned), cudaMemcpyDeviceToHost));		/// get number of corners from device
 
+	printf(" --- Corners found: %d --- \n", number_of_corners);
 
+	/// alocate array for results
+	h_corners = (corner*)malloc(number_of_corners * sizeof(corner));
+	CHECK_ERROR(cudaMalloc((void**)&d_corners, number_of_corners * sizeof(corner)));
+
+	/// find results, sort and transfer to host
+	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE >> > (d_corner_bools, d_corners, d_scores, length, width);
 	CHECK_ERROR(cudaDeviceSynchronize());
+
+	thrust::device_ptr<corner> dev_corners(d_corners);
+
+	thrust::sort(dev_corners, dev_corners + number_of_corners, corner());
+	d_corners = thrust::raw_pointer_cast(&dev_corners[0]);						/// cast pointer
+
+	CHECK_ERROR(cudaMemcpy(h_corners, d_corners, sizeof(corner)*number_of_corners, cudaMemcpyDeviceToHost));
 	end = clock();
 	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
 	printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", width, height, time_measured);
 
-	/// copy result to host
-	CHECK_ERROR(cudaMemcpy(h_corner_bools, d_corner_bools, char_size, cudaMemcpyDeviceToHost));
-
 	/// draw corners 
 	printf(" --- Result displayed by host --- \n");
 	cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
-	for (int i = 0; i < width; i++)
+	float start = (float)h_corners[number_of_corners - 1].score;
+	float end = h_corners[0].score;
+	float rgb_k = 255 / (end - start);
+	for (int i = 0; i < number_of_corners; i++)
 	{
-		for (int j = 0; j < height; j++)
-		{
-			if (h_corner_bools[i + j * width]) {
-				cv::circle(image, cv::Point(i, j), 3, cv::Scalar(0, 255, 0));
-			}
-		}
+		unsigned inc = (h_corners[i].score - start)*rgb_k;
+		// printf("host score %d, %d: %d\n", h_corners[i].x, h_corners[i].y, h_corners[i].score);
+		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
+		cv::circle(image, cv::Point(h_corners[i].x, h_corners[i].y), 3, color);
 	}
 
 	/// show image
@@ -178,13 +180,49 @@ int main(int argc, char **argv)
 	/// free all memory
 	CHECK_ERROR(cudaFree(d_img));
 	CHECK_ERROR(cudaFree(d_corner_bools));
+	CHECK_ERROR(cudaFree(d_scores));
 	free(h_corner_bools);
 	free(h_mask);
 	free(h_circle);
 
-    /// cudaDeviceReset must be called before exiting in order for profiling and
-    /// tracing tools such as Nsight and Visual Profiler to show complete traces.
+	/// cudaDeviceReset must be called before exiting in order for profiling and
+	/// tracing tools such as Nsight and Visual Profiler to show complete traces.
 	CHECK_ERROR(cudaDeviceReset());
+}
 
+
+void run_on_cpu(cv::Mat image) {
+	std::vector<cv::KeyPoint> keypointsD;
+	cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create(threshold, true);
+	detector->detect(image, keypointsD, cv::Mat());
+
+	printf(" --- Corners found: %d --- \n", keypointsD.size());
+
+	cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
+	for (int i = 0; i < keypointsD.size(); i++) {
+		cv::circle(image, keypointsD[i].pt, 3, cv::Scalar(0, 255, 0));
+	}
+
+	show_image(image);
+}
+
+int main(int argc, char **argv)
+{
+
+	parse_args(argc, argv);
+
+	/// load image
+	cv::Mat image;
+	image = cv::imread(filename, 0);
+	cv::Size size(768, 1024);	// resize for testing
+	resize(image, image, size);
+
+	if (mode > 0) {
+		run_on_gpu(image);
+	}
+	else {
+		run_on_cpu(image);
+	}
+	
     return 0;
 }
