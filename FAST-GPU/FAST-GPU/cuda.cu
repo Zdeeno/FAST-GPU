@@ -16,16 +16,16 @@ __device__ char comparator(unsigned char pixel_val, unsigned char circle_val, in
 	}
 }
 
-__device__ char get_score(unsigned char pixel_val, unsigned char circle_val, int threshold) {
+__device__ int get_score(int pixel_val, int circle_val, int threshold) {
 	/// returns score of circle element, positive when higher, negative when lower intensity
-	char val = pixel_val + threshold;
+	int val = pixel_val + threshold;
 	if (circle_val > val) {
 		return circle_val - val;
 	}
 	else {
 		val = pixel_val - threshold;
 		if (circle_val < val) {
-			return -(val - circle_val);
+			return circle_val - val;
 		}
 		else {
 			return 0;
@@ -66,57 +66,52 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	char right = comparator(pixel, input[id1d + d_circle[4]], threshold);
 	char left = comparator(pixel, input[id1d + d_circle[12]], threshold);
 	if (abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2)) {
-		return;
+		return; // TODO: FIX SPEED TEST!!!
 	}
 	/// make complex test and calculate score
-	char score;
+	int score;
 	int score_sum = 0;
 	int max_score = 0;
 	char val;
 	char last_val = -2;
-	unsigned char consecutive = 0;
+	unsigned char consecutive = 1;
 	bool corner = false;
 	for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) /// iterate over whole circle
 	{
-		if (consecutive >= 12) {
+		if (consecutive >= pi) {
 			corner = true;
+			if (score_sum > max_score) {
+				max_score = score_sum;
+			}
 		}
 		score = get_score(pixel, input[id1d + d_circle[i % CIRCLE_SIZE]], threshold);
 		val = (score < 0) ? -1 : (score > 0);  /// signum
-		if (val == last_val) {
+		if (val == last_val && val != 0) {
 			consecutive++;
 			score_sum += abs(score);
 		}
 		else {
-			if (score_sum > max_score) {
-				max_score = score_sum;
-			}
 			consecutive = 1;
 			score_sum = abs(score);
 		}
 		last_val = val;
 	}
-	if (score_sum > max_score) {
-		max_score = score_sum;
-	}
 	if (corner) {
-		scores[id1d] = (unsigned int)max_score;
+		if (score_sum > max_score) {
+			max_score = score_sum;
+		}
+		scores[id1d] = max_score;
 		corner_bools[id1d] = 1;
 	}
 	else {
 		return;
 	}
 	__syncthreads();
+
 	/// non-maximal suppresion
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 	{
-		if (scores[id1d + d_mask[i]] > max_score) {
-			return;
-		}
-	}
-	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
-	{
-		if (d_mask[i]) {
+		if (scores[id1d + d_mask[i]] < max_score) {
 			scores[id1d + d_mask[i]] = 0;
 			corner_bools[id1d + d_mask[i]] = 0;
 		}
@@ -156,10 +151,10 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 		char down = comparator(pixel, sData[s_id1d + d_circle[8]], threshold);
 		char right = comparator(pixel, sData[s_id1d + d_circle[4]], threshold);
 		char left = comparator(pixel, sData[s_id1d + d_circle[12]], threshold);
-		if (!(abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2))) { /// exclude a lot of pixels
+		if (true || !(abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2))) { /// TODO: FIX SPEED TEST
 
 			/// make complex test and calculate score
-			char score;
+			int score;
 			int score_sum = 0;
 			char val;
 			char last_val = -2;
@@ -167,19 +162,19 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 			bool corner = false;
 			for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) // iterate over whole circle
 			{
-				if (consecutive >= 12) {
+				if (consecutive >= pi) {
 					corner = true;
+					if (score_sum > max_score) {
+						max_score = score_sum;
+					}
 				}
 				score = get_score(pixel, sData[s_id1d + d_circle[i % CIRCLE_SIZE]], threshold);
 				val = (score < 0) ? -1 : (score > 0);  // signum
-				if (val == last_val) {
+				if (val == last_val && val != 0) {
 					consecutive++;
 					score_sum += abs(score);
 				}
 				else {
-					if (score_sum > max_score) {
-						max_score = score_sum;
-					}
 					consecutive = 1;
 					score_sum = abs(score);
 				}
@@ -189,7 +184,7 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 				max_score = score_sum;
 			}
 			if (corner) {
-				scores[id1d] = (unsigned int)max_score;
+				scores[id1d] = max_score;
 				corner_bools[id1d] = 1;
 			}
 			else {
@@ -199,19 +194,13 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 	}
 	__syncthreads();
 
+	/// non-maximal suppresion
 	if (max_score > 0) {
-		/// non-maximal suppresion (very time consuming)
 		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 		{
-			if (scores[id1d + d_mask[i]] > max_score) {
-				return;
-			}
-		}
-		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)	/// if this thread has max value on id1d delete everything around in filter
-		{
-			if (d_mask[i]) {
-				corner_bools[id1d + d_mask[i]] = 0;
+			if (scores[id1d + d_mask[i]] < max_score) {
 				scores[id1d + d_mask[i]] = 0;
+				corner_bools[id1d + d_mask[i]] = 0;
 			}
 		}
 	}

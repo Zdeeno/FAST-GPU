@@ -6,6 +6,17 @@ void show_image(cv::Mat img) {
 	cv::waitKey(0);
 }
 
+void print_device_array(unsigned int *device_arr, int length) {
+	int *print = (int*)malloc(length * sizeof(int));
+	CHECK_ERROR(cudaMemcpy(print, device_arr, sizeof(int)*length, cudaMemcpyDeviceToHost));
+
+	for (size_t i = 0; i < length; i++)
+	{
+		printf("%d, ", print[i]);
+	}
+	free(print);
+}
+
 __host__ void create_circle(int *circle, int w) {
 	// create surrounding circle using given width
 	circle[0] = -3 * w;
@@ -96,14 +107,14 @@ void run_on_gpu(cv::Mat image) {
 
 	/// allocate memory
 	h_img = (unsigned char*)malloc(char_size);
-	h_corner_bools = (unsigned char*)malloc(int_size);
+	h_corner_bools = (unsigned*)malloc(int_size);
 	h_circle = (int*)malloc(CIRCLE_SIZE * sizeof(int));
 	h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
 	CHECK_ERROR(cudaMalloc((void**)&d_img, char_size));
-	CHECK_ERROR(cudaMalloc((void**)&d_corner_bools, char_size));
+	CHECK_ERROR(cudaMalloc((void**)&d_corner_bools, int_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
-	CHECK_ERROR(cudaMemset(d_corner_bools, 0, char_size));
+	CHECK_ERROR(cudaMemset(d_corner_bools, 0, int_size));
 	CHECK_ERROR(cudaMemset(d_scores, 0, int_size));
 
 	/// create array from image and copy image to device
@@ -140,6 +151,9 @@ void run_on_gpu(cv::Mat image) {
 	d_corner_bools = thrust::raw_pointer_cast(&dev_bools[0]);						/// cast pointer
 	CHECK_ERROR(cudaMemcpy(&number_of_corners, &d_corner_bools[length - 1], sizeof(unsigned), cudaMemcpyDeviceToHost));		/// get number of corners from device
 
+	//print!!!
+	//print_device_array(d_corner_bools, length);
+
 	printf(" --- Corners found: %d --- \n", number_of_corners);
 
 	/// alocate array for results
@@ -168,8 +182,8 @@ void run_on_gpu(cv::Mat image) {
 	float rgb_k = 255 / (end - start);
 	for (int i = 0; i < number_of_corners; i++)
 	{
+		// printf("score: %d, ", h_corners[i].score);
 		unsigned inc = (h_corners[i].score - start)*rgb_k;
-		// printf("host score %d, %d: %d\n", h_corners[i].x, h_corners[i].y, h_corners[i].score);
 		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
 		cv::circle(image, cv::Point(h_corners[i].x, h_corners[i].y), 3, color);
 	}
