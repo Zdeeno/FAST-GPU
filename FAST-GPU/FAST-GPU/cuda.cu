@@ -1,18 +1,13 @@
 #include "cuda.cuh"
 
 
-__device__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold) {
-	/// very similar to get_score, only returns -1,0,1
-	if (circle_val > (pixel_val + threshold)) {
-		return 1;
+__device__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold, char sign) {
+	/// return boolean if true ... sign parameter gives us criterion
+	if (sign == 1) {
+		return circle_val > (pixel_val + threshold);
 	}
 	else {
-		if (circle_val < (pixel_val - threshold)) {
-			return -1;
-		}
-		else {
-			return 0;
-		}
+		return circle_val < (pixel_val - threshold);
 	}
 }
 
@@ -44,31 +39,35 @@ __device__ int coords_2to1(int x, int y, int width, int height, bool eliminate_p
 	}
 }
 
-__host__ void fill_const_mem(int *h_circle, int *h_mask) {
+__host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared) {
 	CHECK_ERROR(cudaMemcpyToSymbol(d_circle, h_circle, CIRCLE_SIZE * sizeof(int)));
 	CHECK_ERROR(cudaMemcpyToSymbol(d_mask, h_mask, MASK_SIZE * MASK_SIZE * sizeof(int)));
+	CHECK_ERROR(cudaMemcpyToSymbol(d_mask_shared, h_mask_shared, MASK_SIZE * MASK_SIZE * sizeof(int)));
 	return;
 }
 
-__global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
-{
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	int idy = blockIdx.y * blockDim.y + threadIdx.y;
-	/// get 1d coordinates and cutout borders
-	int id1d = coords_2to1(idx, idy, width, height, true);
-	if (id1d == -1) {
-		return;
+__device__ char fast_test(unsigned char *input, int *circle, int threshold, int id) {
+	unsigned char pixel = input[id];
+	unsigned char top = input[id + d_circle[0]];
+	unsigned char right = input[id + d_circle[4]];
+	unsigned char down = input[id + d_circle[8]];
+	unsigned char left = input[id + d_circle[12]];
+
+	unsigned char sum = comparator(pixel, top, threshold, 1) + comparator(pixel, right, threshold, 1) +
+						comparator(pixel, down, threshold, 1) + comparator(pixel, left, threshold, 1);
+	if (sum < 3) {
+		sum = comparator(pixel, top, threshold, -1) + comparator(pixel, right, threshold, -1) +
+			  comparator(pixel, down, threshold, -1) + comparator(pixel, left, threshold, -1);
+		if (sum < 3) {
+			return 1;
+		}
 	}
-	/// fast test
-	unsigned char pixel = input[id1d];
-	char top = comparator(pixel, input[id1d + d_circle[0]], threshold);
-	char down = comparator(pixel, input[id1d + d_circle[8]], threshold);
-	char right = comparator(pixel, input[id1d + d_circle[4]], threshold);
-	char left = comparator(pixel, input[id1d + d_circle[12]], threshold);
-	if (abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2)) {
-		return; // TODO: FIX SPEED TEST!!!
-	}
+	return 0;
+}
+
+__device__ int complex_test(unsigned char *input, unsigned *scores, unsigned *corner_bools, int threshold, int pi, int s_id, int g_id) {
 	/// make complex test and calculate score
+	unsigned char pixel = input[s_id];
 	int score;
 	int score_sum = 0;
 	int max_score = 0;
@@ -84,7 +83,7 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 				max_score = score_sum;
 			}
 		}
-		score = get_score(pixel, input[id1d + d_circle[i % CIRCLE_SIZE]], threshold);
+		score = get_score(pixel, input[s_id + d_circle[i % CIRCLE_SIZE]], threshold);
 		val = (score < 0) ? -1 : (score > 0);  /// signum
 		if (val == last_val && val != 0) {
 			consecutive++;
@@ -100,15 +99,37 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 		if (score_sum > max_score) {
 			max_score = score_sum;
 		}
-		scores[id1d] = max_score;
-		corner_bools[id1d] = 1;
+		scores[g_id] = max_score;
+		corner_bools[g_id] = 1;
+		return max_score;
 	}
 	else {
+		return 0;
+	}
+}
+
+
+/// kernel function with global memory
+__global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int idy = blockIdx.y * blockDim.y + threadIdx.y;
+	/// get 1d coordinates and cutout borders
+	int id1d = coords_2to1(idx, idy, width, height, true);
+	if (id1d == -1) {
 		return;
 	}
-	__syncthreads();
 
+	/// fast test, it turns out that it slows the code a little bit
+	/*
+	if (fast_test(input, d_circle, threshold, id1d)) {
+		return;
+	}
+	*/
+	/// complex test
+	int max_score = 0; // complex_test(input, scores, corner_bools, threshold, pi, id1d, id1d);
 	/// non-maximal suppresion
+	__syncthreads();
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 	{
 		if (scores[id1d + d_mask[i]] < max_score) {
@@ -118,7 +139,6 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	}
 	return;
 }
-
 
 __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
@@ -141,60 +161,18 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 		sData[index1] = input[coords_2to1(global_x1, global_y1, width, height, false)];
 		sData[index2] = input[coords_2to1(global_x2, global_y2, width, height, false)];
 	}
+	__syncthreads();
+
+	int s_id1d = coords_2to1(threadIdx.x + PADDING, threadIdx.y + PADDING, shared_width, shared_width, false);
 	if (id1d != -1) {
-
-		__syncthreads();
 		/// fast test
-		int s_id1d = coords_2to1(threadIdx.x + PADDING, threadIdx.y + PADDING, shared_width, shared_width, false);
-		unsigned char pixel = sData[s_id1d];
-		char top = comparator(pixel, sData[s_id1d + d_circle[0]], threshold);
-		char down = comparator(pixel, sData[s_id1d + d_circle[8]], threshold);
-		char right = comparator(pixel, sData[s_id1d + d_circle[4]], threshold);
-		char left = comparator(pixel, sData[s_id1d + d_circle[12]], threshold);
-		if (true || !(abs(top + down + right + left) < 2 || (abs(top + down) < 2 && abs(left + right) < 2))) { /// TODO: FIX SPEED TEST
-
+		if ( // fast_test(sData, d_circle, threshold, s_id1d) &&
+			true) {
 			/// make complex test and calculate score
-			int score;
-			int score_sum = 0;
-			char val;
-			char last_val = -2;
-			unsigned char consecutive = 0;
-			bool corner = false;
-			for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) // iterate over whole circle
-			{
-				if (consecutive >= pi) {
-					corner = true;
-					if (score_sum > max_score) {
-						max_score = score_sum;
-					}
-				}
-				score = get_score(pixel, sData[s_id1d + d_circle[i % CIRCLE_SIZE]], threshold);
-				val = (score < 0) ? -1 : (score > 0);  // signum
-				if (val == last_val && val != 0) {
-					consecutive++;
-					score_sum += abs(score);
-				}
-				else {
-					consecutive = 1;
-					score_sum = abs(score);
-				}
-				last_val = val;
-			}
-			if (score_sum > max_score) {
-				max_score = score_sum;
-			}
-			if (corner) {
-				scores[id1d] = max_score;
-				corner_bools[id1d] = 1;
-			}
-			else {
-				return;
-			}
+			max_score = complex_test(sData, scores, corner_bools, threshold, pi, s_id1d, id1d);
 		}
 	}
 	__syncthreads();
-
-	/// non-maximal suppresion
 	if (max_score > 0) {
 		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 		{

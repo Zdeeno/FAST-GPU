@@ -34,6 +34,7 @@ unsigned char *h_img;
 unsigned *h_corner_bools;
 int *h_circle;
 int *h_mask;
+int *h_mask_shared;
 corner *h_corners;
 
 /// time measurement
