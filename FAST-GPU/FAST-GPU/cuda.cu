@@ -119,7 +119,6 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	if (id1d == -1) {
 		return;
 	}
-
 	/// fast test, it turns out that it slows the code a little bit
 	/*
 	if (fast_test(input, d_circle, threshold, id1d)) {
@@ -127,15 +126,21 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	}
 	*/
 	/// complex test
-	int max_score = 0; // complex_test(input, scores, corner_bools, threshold, pi, id1d, id1d);
+	int max_score = complex_test(input, scores, corner_bools, threshold, pi, id1d, id1d);
 	/// non-maximal suppresion
 	__syncthreads();
+	bool erase = false;
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 	{
-		if (scores[id1d + d_mask[i]] < max_score) {
-			scores[id1d + d_mask[i]] = 0;
-			corner_bools[id1d + d_mask[i]] = 0;
+		if (scores[id1d + d_mask[i]] > max_score) {
+			erase = true;
+			break;
 		}
+	}
+	__syncthreads();
+	if (erase) {
+		scores[id1d] = 0;
+		corner_bools[id1d] = 0;
 	}
 	return;
 }
@@ -173,14 +178,19 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 		}
 	}
 	__syncthreads();
-	if (max_score > 0) {
-		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
-		{
-			if (scores[id1d + d_mask[i]] < max_score) {
-				scores[id1d + d_mask[i]] = 0;
-				corner_bools[id1d + d_mask[i]] = 0;
-			}
+	/// non-max suppresion
+	bool erase = false;
+	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
+	{
+		if (scores[id1d + d_mask[i]] > max_score) {
+			erase = true;
+			break;
 		}
+	}
+	__syncthreads();
+	if (erase) {
+		scores[id1d] = 0;
+		corner_bools[id1d] = 0;
 	}
 	return;
 }

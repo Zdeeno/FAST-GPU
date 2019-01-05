@@ -132,12 +132,12 @@ void run_on_gpu(cv::Mat image) {
 		printf(" --- Memory allocated, running kernel --- \n");
 		/// run kernel and measure the time
 		start = clock();
-		int sh_mem = shared_width * shared_width * sizeof(char);
+		int sh_mem = shared_width * shared_width * sizeof(int);
 		FAST_shared << <grid, blocks, sh_mem >> > (d_img, d_scores, d_corner_bools, width, height, threshold, pi);
 	}
 	else {
 		printf(" --- Using global memory --- \n");
-		create_circle(h_circle, shared_width);
+		create_circle(h_circle, width);
 		create_mask(h_mask_shared, shared_width);
 		create_mask(h_mask, width);
 		fill_const_mem(h_circle, h_mask, h_mask_shared);
@@ -146,6 +146,7 @@ void run_on_gpu(cv::Mat image) {
 		start = clock();
 		FAST_global << <grid, blocks >> > (d_img, d_scores, d_corner_bools, width, height, threshold, pi);
 	}
+	CHECK_ERROR(cudaDeviceSynchronize());
 
 	/// create new CUDA array of corners with appropriate length
 	thrust::device_ptr<unsigned> dev_bools(d_corner_bools);
@@ -185,7 +186,7 @@ void run_on_gpu(cv::Mat image) {
 	float rgb_k = 255 / (end - start);
 	for (int i = 0; i < number_of_corners; i++)
 	{
-		printf("score: %d, ", h_corners[i].score);
+		// printf("score: %d, ", h_corners[i].score);
 		unsigned inc = (h_corners[i].score - start)*rgb_k;
 		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
 		cv::circle(image, cv::Point(h_corners[i].x, h_corners[i].y), 3, color);
