@@ -30,7 +30,7 @@ __device__ int get_score(int pixel_val, int circle_val, int threshold) {
 
 __device__ int coords_2to1(int x, int y, int width, int height, bool eliminate_padding) {
 	/// recalculate 2d indexes into 1d array
-	if (eliminate_padding && ((x - PADDING) < 0 || (x + PADDING) >= width || (y - PADDING) < 0 || (y + PADDING) >= height)) {
+	if (eliminate_padding && ((x - PADDING) <= 0 || (x + PADDING) >= width || (y - PADDING) <= 0 || (y + PADDING) >= height)) {
 		/// cutout the borders of image, only active when eliminate_padding == true
 		return -1;
 	}
@@ -108,7 +108,6 @@ __device__ int complex_test(unsigned char *input, unsigned *scores, unsigned *co
 	}
 }
 
-
 /// kernel function with global memory
 __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
@@ -153,18 +152,21 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 	int idy = blockIdx.y * blockDim.y + threadIdx.y;
 	/// get 1d coordinates and cutout borders
 	int id1d = coords_2to1(idx, idy, width, height, true);
+	int length = height * width;
 	/// fill in shared memory
 	int shared_width = BLOCK_SIZE + (2 * PADDING);
 	int s_mem_half_size = ((shared_width)*(shared_width)) / 2;
 	int index1 = coords_2to1(threadIdx.x, threadIdx.y, BLOCK_SIZE, BLOCK_SIZE, false);
+	int index2 = index1 + s_mem_half_size;
+	int global_x1 = -PADDING + (index1 % shared_width) + blockIdx.x * blockDim.x;
+	int global_y1 = -PADDING + (index1 / shared_width) + blockIdx.y * blockDim.y;
+	int global_x2 = -PADDING + (index2 % shared_width) + blockIdx.x * blockDim.x;
+	int global_y2 = -PADDING + (index2 / shared_width) + blockIdx.y * blockDim.y;
+	int g1 = coords_2to1(global_x1, global_y1, width, height, false);
+	int g2 = coords_2to1(global_x2, global_y2, width, height, false);
 	if (index1 < s_mem_half_size) {
-		int index2 = index1 + s_mem_half_size;
-		int global_x1 = -PADDING + (index1 % shared_width) + blockIdx.x * blockDim.x;
-		int global_y1 = -PADDING + (index1 / shared_width) + blockIdx.y * blockDim.y;
-		int global_x2 = -PADDING + (index2 % shared_width) + blockIdx.x * blockDim.x;
-		int global_y2 = -PADDING + (index2 / shared_width) + blockIdx.y * blockDim.y;
-		sData[index1] = input[coords_2to1(global_x1, global_y1, width, height, false)];
-		sData[index2] = input[coords_2to1(global_x2, global_y2, width, height, false)];
+		sData[index1] = input[g1];
+		sData[index2] = input[g2];
 	}
 	__syncthreads();
 
@@ -178,19 +180,30 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 		}
 	}
 	__syncthreads();
-	/// non-max suppresion
-	bool erase = false;
-	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
-	{
-		if (scores[id1d + d_mask[i]] > max_score) {
-			erase = true;
-			break;
-		}
+
+	/// refill shared memory
+	unsigned *s_data = (unsigned*)sData;
+	if (index1 < s_mem_half_size && g1 > 0 && g2 < length) {
+		s_data[index1] = scores[g1];
+		s_data[index2] = scores[g2];
 	}
 	__syncthreads();
-	if (erase) {
-		scores[id1d] = 0;
-		corner_bools[id1d] = 0;
+	
+	/// non-max suppresion
+	bool erase = false;
+	if (id1d != -1) {
+		for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
+		{
+			if (s_data[s_id1d + d_mask_shared[i]] > max_score) {
+				erase = true;
+				break;
+			}
+		}
+		__syncthreads();
+		if (erase) {
+			scores[id1d] = 0;
+			corner_bools[id1d] = 0;
+		}
 	}
 	return;
 }

@@ -114,7 +114,6 @@ void run_on_gpu(cv::Mat image) {
 	CHECK_ERROR(cudaMalloc((void**)&d_img, char_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_corner_bools, int_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
-	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
 	CHECK_ERROR(cudaMemset(d_corner_bools, 0, int_size));
 	CHECK_ERROR(cudaMemset(d_scores, 0, int_size));
 
@@ -160,6 +159,10 @@ void run_on_gpu(cv::Mat image) {
 
 	printf(" --- Corners found: %d --- \n", number_of_corners);
 
+	if (number_of_corners == 0) {
+		return;
+	}
+
 	/// alocate array for results
 	h_corners = (corner*)malloc(number_of_corners * sizeof(corner));
 	CHECK_ERROR(cudaMalloc((void**)&d_corners, number_of_corners * sizeof(corner)));
@@ -193,7 +196,7 @@ void run_on_gpu(cv::Mat image) {
 	}
 
 	/// show image
-	show_image(image);
+	// show_image(image);
 
 	/// free all memory
 	CHECK_ERROR(cudaFree(d_img));
@@ -239,7 +242,7 @@ int main(int argc, char **argv)
 	cv::Mat image;
 	image = cv::imread(filename, 0);
 	cv::Size size(768, 1024);	// resize for testing
-	resize(image, image, size);
+	// resize(image, image, size);
 
 	if (mode > 0) {
 		run_on_gpu(image);
