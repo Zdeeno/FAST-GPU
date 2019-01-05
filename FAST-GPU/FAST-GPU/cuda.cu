@@ -30,7 +30,7 @@ __device__ int get_score(int pixel_val, int circle_val, int threshold) {
 
 __device__ int coords_2to1(int x, int y, int width, int height, bool eliminate_padding) {
 	/// recalculate 2d indexes into 1d array
-	if (eliminate_padding && ((x - PADDING) <= 0 || (x + PADDING) >= width || (y - PADDING) <= 0 || (y + PADDING) >= height)) {
+	if (eliminate_padding && ((x - PADDING) < 0 || (x + PADDING) >= width || (y - PADDING) < 0 || (y + PADDING) >= height)) {
 		/// cutout the borders of image, only active when eliminate_padding == true
 		return -1;
 	}
