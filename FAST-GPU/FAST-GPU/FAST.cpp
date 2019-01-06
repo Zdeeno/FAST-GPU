@@ -144,20 +144,28 @@ void parse_args(int argc, char **argv){
 	return;
 }
 
-void run_on_gpu(cv::Mat image) {
-	
-	/// get dimension of image
-	int width = image.cols;
-	int height = image.rows;
-	int length = width * height;
-	int shared_width = BLOCK_SIZE + (2 * PADDING);
+void fill_const_mem(int width, int shared_width) {
+	/// create circle and mask and copy to device
+	if (mode == 3) {
+		printf(" --- Using shared memory --- \n");
+		create_circle(h_circle, shared_width);
+		create_mask(h_mask_shared, shared_width);
+		create_mask(h_mask, width);
+		fill_const_mem(h_circle, h_mask, h_mask_shared);
+	}
+	else {
+		printf(" --- Using global memory --- \n");
+		create_circle(h_circle, width);
+		create_mask(h_mask_shared, shared_width);
+		create_mask(h_mask, width);
+		fill_const_mem(h_circle, h_mask, h_mask_shared);
+	}
+}
+
+void preallocate_mem(cv::Mat image, int length) {
 	size_t char_size = length * sizeof(unsigned char);
 	size_t int_size = length * sizeof(unsigned int);
 	printf(" --- Image loaded --- \n");
-
-	/// define grid and block sizes
-	dim3 blocks(BLOCK_SIZE, BLOCK_SIZE);
-	dim3 grid(((int)(width - 1) / BLOCK_SIZE) + 1, ((int)(height - 1) / BLOCK_SIZE) + 1);
 
 	/// allocate memory
 	h_img = (unsigned char*)malloc(char_size);
@@ -174,30 +182,26 @@ void run_on_gpu(cv::Mat image) {
 	/// create array from image and copy image to device
 	h_img = image.data;
 	CHECK_ERROR(cudaMemcpy(d_img, h_img, char_size, cudaMemcpyHostToDevice));
+}
 
-	/// create circle and copy to device
+corner* get_corners_gpu(cv::Mat image, int shared_width, int length, int* corners_num) {
+	/// define grid and block sizes
+	dim3 blocks(BLOCK_SIZE, BLOCK_SIZE);
+	dim3 grid(((int)(image.cols - 1) / BLOCK_SIZE) + 1, ((int)(image.rows - 1) / BLOCK_SIZE) + 1);
+
 	if (mode == 3) {
-		printf(" --- Using shared memory --- \n");
-		create_circle(h_circle, shared_width);
-		create_mask(h_mask_shared, shared_width);
-		create_mask(h_mask, width);
-		fill_const_mem(h_circle, h_mask, h_mask_shared);
 		printf(" --- Memory allocated, running kernel --- \n");
 		/// run kernel and measure the time
 		start = clock();
 		int sh_mem = shared_width * shared_width * sizeof(int);
-		FAST_shared << <grid, blocks, sh_mem >> > (d_img, d_scores, d_corner_bools, width, height, threshold, pi);
+		FAST_shared << <grid, blocks, sh_mem >> > (d_img, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
 	else {
-		printf(" --- Using global memory --- \n");
-		create_circle(h_circle, width);
-		create_mask(h_mask_shared, shared_width);
-		create_mask(h_mask, width);
-		fill_const_mem(h_circle, h_mask, h_mask_shared);
+
 		printf(" --- Memory allocated, running kernel --- \n");
 		/// run kernel and measure the time
 		start = clock();
-		FAST_global << <grid, blocks >> > (d_img, d_scores, d_corner_bools, width, height, threshold, pi);
+		FAST_global << <grid, blocks >> > (d_img, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
 	CHECK_ERROR(cudaDeviceSynchronize());
 
@@ -212,21 +216,22 @@ void run_on_gpu(cv::Mat image) {
 	//print_device_array(d_corner_bools, length);
 
 	printf(" --- Corners found: %d --- \n", number_of_corners);
-
+	*corners_num = number_of_corners;
 	if (number_of_corners == 0) {
-		return;
+		return NULL;
 	}
 
 	/// alocate array for results
+	corner *h_corners;
 	h_corners = (corner*)malloc(number_of_corners * sizeof(corner));
 	CHECK_ERROR(cudaMalloc((void**)&d_corners, number_of_corners * sizeof(corner)));
 
 	/// find results, sort and transfer to host
-	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE >> > (d_corner_bools, d_corners, d_scores, length, width);
+	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE >> > (d_corner_bools, d_corners, d_scores, length, image.cols);
 	CHECK_ERROR(cudaDeviceSynchronize());
 	end = clock();
 	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-	printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", width, height, time_measured);
+	printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
 
 	thrust::device_ptr<corner> dev_corners(d_corners);
 
@@ -234,6 +239,20 @@ void run_on_gpu(cv::Mat image) {
 	d_corners = thrust::raw_pointer_cast(&dev_corners[0]);						/// cast pointer
 
 	CHECK_ERROR(cudaMemcpy(h_corners, d_corners, sizeof(corner)*number_of_corners, cudaMemcpyDeviceToHost));
+	return h_corners;
+}
+
+void run_on_gpu(cv::Mat image) {
+	
+	/// get dimension of image
+	int length = image.cols * image.rows;
+	preallocate_mem(image, length);
+
+	int shared_width = BLOCK_SIZE + (2 * PADDING);
+	fill_const_mem(image.cols, shared_width);
+
+	int number_of_corners;
+	corner* h_corners = get_corners_gpu(image, shared_width, length, &number_of_corners);
 
 	/// draw corners 
 	printf(" --- Result displayed by host --- \n");
