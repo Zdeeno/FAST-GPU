@@ -50,4 +50,6 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi);
 __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared);
 __global__ void find_corners(unsigned *scanned_array, corner *result, unsigned *scores, int length, int width);
+__device__ __host__ char fast_test(unsigned char *input, int *circle, int threshold, int id);
+__device__ __host__ int complex_test(unsigned char *input, unsigned *scores, unsigned *corner_bools, int *circle, int threshold, int pi, int s_id, int g_id);
 #endif

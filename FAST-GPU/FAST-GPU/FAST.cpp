@@ -17,7 +17,7 @@ void print_device_array(unsigned int *device_arr, int length) {
 	free(print);
 }
 
-__host__ void create_circle(int *circle, int w) {
+void create_circle(int *circle, int w) {
 	// create surrounding circle using given width
 	circle[0] = -3 * w;
 	circle[1] = -3 * w + 1;
@@ -40,9 +40,9 @@ __host__ void create_circle(int *circle, int w) {
 	circle[15] = -3 * w - 1;
 }
 
-__host__ void create_mask(int *mask, int w) {
+void create_mask(int *mask, int w) {
 	// create mask with given defined mask size and width
-	int start = (int)-MASK_SIZE / 2;
+	int start = -(int)MASK_SIZE / 2;
 	int end = (int)MASK_SIZE / 2;
 	int index = 0;
 	for (int i = start; i <= end; i++)
@@ -53,6 +53,60 @@ __host__ void create_mask(int *mask, int w) {
 			index++;
 		}
 	}
+}
+
+std::vector<corner> cpu_FAST(unsigned char *input, unsigned *scores, int *mask, int *circle, int width, int height) {
+	/// fast test
+	std::vector<corner> ret;
+	int id1d;
+	for (size_t y = PADDING; y < height - PADDING; y++)
+	{
+		for (size_t x = PADDING; x < width - PADDING; x++)
+		{
+			id1d = (width * y) + x;
+			scores[id1d] = fast_test(input, circle, threshold, id1d);
+		}
+	}
+	/// complex test
+	for (size_t y = PADDING; y < height - PADDING; y++)
+	{
+		for (size_t x = PADDING; x < width - PADDING; x++)
+		{
+			id1d = (width * y) + x;
+			if (scores[id1d] > 0) {
+				scores[id1d] = complex_test(input, scores, scores, circle, threshold, pi, id1d, id1d);
+			}
+		}
+	}
+	/// non-max suppression
+	bool is_max;
+	int val;
+	for (size_t y = PADDING; y < height - PADDING; y++)
+	{
+		for (size_t x = PADDING; x < width - PADDING; x++)
+		{
+			id1d = (width * y) + x;
+			val = scores[id1d];
+			if (val > 0) {
+				is_max = true;
+				for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
+				{
+					if (val < scores[id1d + mask[i]]) {
+						is_max = false;
+						break;
+					}
+				}
+				if (is_max) {
+					corner c;
+					c.score = (unsigned)val;
+					c.x = (unsigned)x;
+					c.y = (unsigned)y;
+					ret.push_back(c);
+				}
+			}
+		}
+	}
+	return ret;
 }
 
 void parse_args(int argc, char **argv){
@@ -122,7 +176,7 @@ void run_on_gpu(cv::Mat image) {
 	CHECK_ERROR(cudaMemcpy(d_img, h_img, char_size, cudaMemcpyHostToDevice));
 
 	/// create circle and copy to device
-	if (mode == 2) {
+	if (mode == 3) {
 		printf(" --- Using shared memory --- \n");
 		create_circle(h_circle, shared_width);
 		create_mask(h_mask_shared, shared_width);
@@ -196,7 +250,7 @@ void run_on_gpu(cv::Mat image) {
 	}
 
 	/// show image
-	// show_image(image);
+	show_image(image);
 
 	/// free all memory
 	CHECK_ERROR(cudaFree(d_img));
@@ -213,24 +267,48 @@ void run_on_gpu(cv::Mat image) {
 
 
 void run_on_cpu(cv::Mat image) {
-	std::vector<cv::KeyPoint> keypointsD;
+	if (mode == 1) {
+		std::vector<cv::KeyPoint> keypointsD;
 
-	start = clock();
-	cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create(threshold, true);
-	detector->detect(image, keypointsD, cv::Mat());
-	end = clock();
+		start = clock();
+		cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create(threshold, true);
+		detector->detect(image, keypointsD, cv::Mat());
+		end = clock();
 
-	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-	printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
+		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
+		printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
 
-	printf(" --- Corners found: %d --- \n", keypointsD.size());
+		printf(" --- Corners found: %d --- \n", keypointsD.size());
 
-	cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
-	for (int i = 0; i < keypointsD.size(); i++) {
-		cv::circle(image, keypointsD[i].pt, 3, cv::Scalar(0, 255, 0));
+		// cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
+		for (int i = 0; i < keypointsD.size(); i++) {
+			cv::circle(image, keypointsD[i].pt, 3, cv::Scalar(0, 255, 0));
+		}
+	}
+	else {
+		cv::Mat gray_img = image.clone();	// create gray copy
+		cv::cvtColor(gray_img, gray_img, cv::COLOR_BGR2GRAY);
+		h_circle = (int*)malloc(CIRCLE_SIZE * sizeof(int));
+		h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
+		unsigned *h_scores = (unsigned*)malloc(image.cols*image.rows * sizeof(int));
+		create_circle(h_circle, image.cols);
+		create_mask(h_mask, image.cols);
+		start = clock();
+		std::vector<corner> points = cpu_FAST(gray_img.data, h_scores, h_mask, h_circle, image.cols, image.rows);
+		end = clock();
+		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
+		printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
+
+		printf(" --- Corners found: %d --- \n", points.size());
+
+		for (int i = 0; i < points.size(); i++) {
+			cv::circle(image, cv::Point(points[i].x, points[i].y), 5, cv::Scalar(0, 255, 0));
+		}
 	}
 
-	show_image(image);
+	cv::Size size(1280, 720);	// resize for testing
+	//resize(image, image, size);
+	//show_image(image);
 }
 
 int main(int argc, char **argv)
@@ -239,16 +317,35 @@ int main(int argc, char **argv)
 	parse_args(argc, argv);
 
 	/// load image
-	cv::Mat image;
-	image = cv::imread(filename, 0);
-	cv::Size size(768, 1024);	// resize for testing
-	// resize(image, image, size);
+	if (foto) {
+		cv::Mat image;
+		image = cv::imread(filename, 0);
+		cv::Size size(600, 800);	// resize for testing
+		resize(image, image, size);
 
-	if (mode > 0) {
-		run_on_gpu(image);
+		if (mode > 1) {
+			run_on_gpu(image);
+		}
+		else {
+			run_on_cpu(image);
+		}
 	}
-	else {
-		run_on_cpu(image);
+	if (video){
+		cv::VideoCapture cap = cv::VideoCapture(filename);
+		cv::Mat frame;
+		cap >> frame;
+		// Capture frame-by-frame
+		cv::VideoWriter video = cv::VideoWriter("outcpp.avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 24, frame.size(), true);
+		while (1) {
+			run_on_cpu(frame);
+			video.write(frame);
+			cap >> frame;
+			// If the frame is empty, break immediately
+			if (frame.empty())
+				break;
+		}
+		cap.release();
+		video.release();
 	}
 	
     return 0;

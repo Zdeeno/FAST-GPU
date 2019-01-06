@@ -1,7 +1,7 @@
 #include "cuda.cuh"
 
 
-__device__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold, char sign) {
+__device__ __host__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold, char sign) {
 	/// return boolean if true ... sign parameter gives us criterion
 	if (sign == 1) {
 		return circle_val > (pixel_val + threshold);
@@ -11,7 +11,7 @@ __device__ char comparator(unsigned char pixel_val, unsigned char circle_val, in
 	}
 }
 
-__device__ int get_score(int pixel_val, int circle_val, int threshold) {
+__device__ __host__ int get_score(int pixel_val, int circle_val, int threshold) {
 	/// returns score of circle element, positive when higher, negative when lower intensity
 	int val = pixel_val + threshold;
 	if (circle_val > val) {
@@ -46,7 +46,7 @@ __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared) {
 	return;
 }
 
-__device__ char fast_test(unsigned char *input, int *circle, int threshold, int id) {
+__device__ __host__ char fast_test(unsigned char *input, int *circle, int threshold, int id) {
 	unsigned char pixel = input[id];
 	unsigned char top = input[id + d_circle[0]];
 	unsigned char right = input[id + d_circle[4]];
@@ -65,7 +65,8 @@ __device__ char fast_test(unsigned char *input, int *circle, int threshold, int 
 	return 0;
 }
 
-__device__ int complex_test(unsigned char *input, unsigned *scores, unsigned *corner_bools, int threshold, int pi, int s_id, int g_id) {
+
+__device__ __host__ int complex_test(unsigned char *input, unsigned *scores, unsigned *corner_bools, int *circle, int threshold, int pi, int s_id, int g_id) {	
 	/// make complex test and calculate score
 	unsigned char pixel = input[s_id];
 	int score;
@@ -83,9 +84,9 @@ __device__ int complex_test(unsigned char *input, unsigned *scores, unsigned *co
 				max_score = score_sum;
 			}
 		}
-		score = get_score(pixel, input[s_id + d_circle[i % CIRCLE_SIZE]], threshold);
+		score = get_score(pixel, input[s_id + circle[i % CIRCLE_SIZE]], threshold);
 		val = (score < 0) ? -1 : (score > 0);  /// signum
-		if (val == last_val && val != 0) {
+		if (val != 0 && val == last_val) {
 			consecutive++;
 			score_sum += abs(score);
 		}
@@ -99,8 +100,8 @@ __device__ int complex_test(unsigned char *input, unsigned *scores, unsigned *co
 		if (score_sum > max_score) {
 			max_score = score_sum;
 		}
-		scores[g_id] = max_score;
 		corner_bools[g_id] = 1;
+		scores[g_id] = max_score;
 		return max_score;
 	}
 	else {
@@ -125,9 +126,10 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	}
 	*/
 	/// complex test
-	int max_score = complex_test(input, scores, corner_bools, threshold, pi, id1d, id1d);
+	int max_score = complex_test(input, scores, corner_bools, d_circle, threshold, pi, id1d, id1d);
 	/// non-maximal suppresion
 	__syncthreads();
+
 	bool erase = false;
 	for (size_t i = 0; i < MASK_SIZE*MASK_SIZE; i++)
 	{
@@ -176,7 +178,7 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 		if ( // fast_test(sData, d_circle, threshold, s_id1d) &&
 			true) {
 			/// make complex test and calculate score
-			max_score = complex_test(sData, scores, corner_bools, threshold, pi, s_id1d, id1d);
+			max_score = complex_test(sData, scores, corner_bools, d_circle, threshold, pi, s_id1d, id1d);
 		}
 	}
 	__syncthreads();
