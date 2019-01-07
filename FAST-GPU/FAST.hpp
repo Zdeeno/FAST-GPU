@@ -25,11 +25,12 @@
 
 /// argument parsing
 int threshold = 75;
-int mode = 2;
+int mode = 1;
 int pi = 12;
 char *filename = NULL;
 bool video = false;
 bool foto = false;
+int circle_size = 5;
 
 /// host variables
 unsigned char *h_img;
@@ -37,6 +38,9 @@ unsigned *h_corner_bools;
 int *h_circle;
 int *h_mask;
 int *h_mask_shared;
+
+/// streams for gpu video
+cudaStream_t memory_s, work_s;
 
 /// time measurement
 clock_t start, end;

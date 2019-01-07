@@ -10,6 +10,7 @@
 #include <thrust/scan.h>
 #include <thrust/sort.h>
 #include <thrust/device_vector.h>
+#include <thrust/execution_policy.h>
 
 #define PADDING 3
 #define BLOCK_SIZE 32	/// max 32
@@ -37,7 +38,8 @@ typedef struct corner {
 } corner;
 
 /// device variables
-static unsigned char *d_img;
+static unsigned char *d_img_old;
+static unsigned char *d_img_new;
 static unsigned *d_corner_bools;
 static unsigned *d_scores;
 static corner *d_corners;

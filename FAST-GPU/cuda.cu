@@ -43,6 +43,7 @@ __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared) {
 	CHECK_ERROR(cudaMemcpyToSymbol(d_circle, h_circle, CIRCLE_SIZE * sizeof(int)));
 	CHECK_ERROR(cudaMemcpyToSymbol(d_mask, h_mask, MASK_SIZE * MASK_SIZE * sizeof(int)));
 	CHECK_ERROR(cudaMemcpyToSymbol(d_mask_shared, h_mask_shared, MASK_SIZE * MASK_SIZE * sizeof(int)));
+	CHECK_ERROR(cudaDeviceSynchronize());
 	return;
 }
 
@@ -166,13 +167,15 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 	int global_y2 = -PADDING + (index2 / shared_width) + blockIdx.y * blockDim.y;
 	int g1 = coords_2to1(global_x1, global_y1, width, height, false);
 	int g2 = coords_2to1(global_x2, global_y2, width, height, false);
-	if (index1 < s_mem_half_size) {
+	if (index1 < s_mem_half_size && g1 > 0 && g2 < length) {
 		sData[index1] = input[g1];
 		sData[index2] = input[g2];
 	}
 	__syncthreads();
 
 	int s_id1d = coords_2to1(threadIdx.x + PADDING, threadIdx.y + PADDING, shared_width, shared_width, false);
+	
+
 	if (id1d != -1) {
 		/// fast test
 		if ( // fast_test(sData, d_circle, threshold, s_id1d) &&
@@ -201,21 +204,21 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 				break;
 			}
 		}
-		__syncthreads();
-		if (erase) {
-			scores[id1d] = 0;
-			corner_bools[id1d] = 0;
-		}
+	}
+	__syncthreads();
+	if (erase) {
+		scores[id1d] = 0;
+		corner_bools[id1d] = 0;
 	}
 	return;
 }
 
 __global__ void find_corners(unsigned *scanned_array, corner *result, unsigned *scores, int length, int width) {
 	unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx < length && idx > 1) {
+	if (idx < length && idx > 0) {
 		int prev = idx - 1;
 		int val = scanned_array[idx];
-		if (scanned_array[prev] < scanned_array[idx]) {
+		if (scanned_array[prev] < val) {
 			result[val - 1].x = idx % width;
 			result[val - 1].y = idx / width;
 			result[val - 1].score = scores[idx];

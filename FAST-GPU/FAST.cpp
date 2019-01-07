@@ -12,7 +12,9 @@ void print_device_array(unsigned int *device_arr, int length) {
 
 	for (size_t i = 0; i < length; i++)
 	{
-		printf("%d, ", print[i]);
+		if (print[i] != 0) {
+			printf("%d, ", print[i]);
+		}
 	}
 	free(print);
 }
@@ -119,24 +121,25 @@ void parse_args(int argc, char **argv){
 		if (arg == "-i") foto = true;
 		if (arg == "-v") video = true;
 		if (arg == "-t") threshold = atoi(argv[i + 1]);
+		if (arg == "-c") circle_size = atoi(argv[i + 1]);
 	}
 	if (filename == NULL) {
-		printf("\n --- Path to image must be specified in arguments ... quiting ---");
+		printf("\n--- Path to image must be specified in arguments ... quiting ---");
 		exit(1);
 	}
 	if (mode < 0 || mode > 20) {
-		printf("\n --- Mode must be in range 0 - 2 ... quiting ---");
+		printf("\n--- Mode must be in range 0 - 2 ... quiting ---");
 		exit(1);
 	}
 	if (pi < 9 || pi > 12) {
-		printf("\n --- Pi must be in range 9 - 12 ... quiting ---");
+		printf("\n--- Pi must be in range 9 - 12 ... quiting ---");
 		exit(1);
 	}
 	if (threshold < 0 || threshold > 255) {
-		printf("\n --- Threshold must be in range 0 - 255 ... quiting ---");
+		printf("\n--- Threshold must be in range 0 - 255 ... quiting ---");
 		exit(1);
 	}
-	printf("\n --- Runing with following setup: --- \n");
+	printf("\n--- Runing with following setup: --- \n");
 	printf("     Threshold: %d\n", threshold);
 	printf("     Pi: %d\n", pi);
 	printf("     Mode: %d\n", mode);
@@ -144,17 +147,17 @@ void parse_args(int argc, char **argv){
 	return;
 }
 
-void fill_const_mem(int width, int shared_width) {
+void fill_gpu_const_mem(int width, int shared_width) {
 	/// create circle and mask and copy to device
 	if (mode == 3) {
-		printf(" --- Using shared memory --- \n");
+		printf("--- Using shared memory --- \n");
 		create_circle(h_circle, shared_width);
 		create_mask(h_mask_shared, shared_width);
 		create_mask(h_mask, width);
 		fill_const_mem(h_circle, h_mask, h_mask_shared);
 	}
 	else {
-		printf(" --- Using global memory --- \n");
+		printf("--- Using global memory --- \n");
 		create_circle(h_circle, width);
 		create_mask(h_mask_shared, shared_width);
 		create_mask(h_mask, width);
@@ -162,10 +165,10 @@ void fill_const_mem(int width, int shared_width) {
 	}
 }
 
-void preallocate_mem(cv::Mat image, int length) {
+void init_gpu(cv::Mat image, int length, int shared_width) {
 	size_t char_size = length * sizeof(unsigned char);
 	size_t int_size = length * sizeof(unsigned int);
-	printf(" --- Image loaded --- \n");
+	printf("--- GPU memory initialized --- \n");
 
 	/// allocate memory
 	h_img = (unsigned char*)malloc(char_size);
@@ -173,49 +176,68 @@ void preallocate_mem(cv::Mat image, int length) {
 	h_circle = (int*)malloc(CIRCLE_SIZE * sizeof(int));
 	h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
 	h_mask_shared = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
-	CHECK_ERROR(cudaMalloc((void**)&d_img, char_size));
+	CHECK_ERROR(cudaMalloc((void**)&d_img_old, char_size));
+	CHECK_ERROR(cudaMalloc((void**)&d_img_new, char_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_corner_bools, int_size));
 	CHECK_ERROR(cudaMalloc((void**)&d_scores, int_size));
-	CHECK_ERROR(cudaMemset(d_corner_bools, 0, int_size));
-	CHECK_ERROR(cudaMemset(d_scores, 0, int_size));
 
-	/// create array from image and copy image to device
-	h_img = image.data;
-	CHECK_ERROR(cudaMemcpy(d_img, h_img, char_size, cudaMemcpyHostToDevice));
+	fill_gpu_const_mem(image.cols, shared_width);
 }
 
-corner* get_corners_gpu(cv::Mat image, int shared_width, int length, int* corners_num) {
+void allocate_new_image(cv::Mat image, int length, cudaStream_t stream) {
+	/// create array from image and copy image to device
+	size_t char_size = length * sizeof(unsigned char);
+	h_img = image.data;
+	CHECK_ERROR(cudaMemcpyAsync(d_img_new, h_img, char_size, cudaMemcpyHostToDevice, stream));
+}
+
+void run_fast_algo(cv::Mat image, int shared_width, int length, cudaStream_t work) {
 	/// define grid and block sizes
 	dim3 blocks(BLOCK_SIZE, BLOCK_SIZE);
 	dim3 grid(((int)(image.cols - 1) / BLOCK_SIZE) + 1, ((int)(image.rows - 1) / BLOCK_SIZE) + 1);
-
+	unsigned char* img_ptr = d_img_new;
+	size_t int_size = length * sizeof(int);
+	CHECK_ERROR(cudaMemsetAsync(d_corner_bools, 0, int_size, work));
+	CHECK_ERROR(cudaMemsetAsync(d_scores, 0, int_size, work));
+	CHECK_ERROR(cudaStreamSynchronize(work));
 	if (mode == 3) {
-		printf(" --- Memory allocated, running kernel --- \n");
 		/// run kernel and measure the time
 		start = clock();
 		int sh_mem = shared_width * shared_width * sizeof(int);
-		FAST_shared << <grid, blocks, sh_mem >> > (d_img, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
+		FAST_shared << <grid, blocks, sh_mem, work >> > (img_ptr, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
 	else {
-
-		printf(" --- Memory allocated, running kernel --- \n");
 		/// run kernel and measure the time
 		start = clock();
-		FAST_global << <grid, blocks >> > (d_img, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
+		FAST_global << <grid, blocks, 0, work >> > (img_ptr, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
-	CHECK_ERROR(cudaDeviceSynchronize());
+	// CHECK_ERROR(cudaStreamSynchronize(work)); maybe you have to uncomment this
+}
 
+void write_circles(cv::Mat image, corner* corners, int number_of_corners) {
+	/// draw corners 
+	float start = (float)corners[number_of_corners - 1].score;
+	float end = (float)corners[0].score;
+	float rgb_k = 255 / (end - start);
+	for (int i = 0; i < number_of_corners; i++)
+	{
+		unsigned inc = (corners[i].score - start)*rgb_k;
+		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
+		cv::circle(image, cv::Point(corners[i].x, corners[i].y), circle_size, color);
+	}
+}
+
+corner* obtain_sorted_results(int length, int* corners_num, cudaStream_t stream, int width) {
 	/// create new CUDA array of corners with appropriate length
 	thrust::device_ptr<unsigned> dev_bools(d_corner_bools);
-	thrust::inclusive_scan(dev_bools, dev_bools + length, dev_bools);		/// scanned values
+	thrust::inclusive_scan(thrust::cuda::par.on(stream), dev_bools, dev_bools + length, dev_bools);		/// scanned values
 	unsigned number_of_corners;
+	CHECK_ERROR(cudaStreamSynchronize(stream));
 	d_corner_bools = thrust::raw_pointer_cast(&dev_bools[0]);						/// cast pointer
-	CHECK_ERROR(cudaMemcpy(&number_of_corners, &d_corner_bools[length - 1], sizeof(unsigned), cudaMemcpyDeviceToHost));		/// get number of corners from device
+	CHECK_ERROR(cudaMemcpyAsync(&number_of_corners, &d_corner_bools[length - 1], sizeof(unsigned), cudaMemcpyDeviceToHost, stream));		/// get number of corners from device
 
-	//print!!!
-	//print_device_array(d_corner_bools, length);
+	CHECK_ERROR(cudaStreamSynchronize(stream));
 
-	printf(" --- Corners found: %d --- \n", number_of_corners);
 	*corners_num = number_of_corners;
 	if (number_of_corners == 0) {
 		return NULL;
@@ -227,63 +249,31 @@ corner* get_corners_gpu(cv::Mat image, int shared_width, int length, int* corner
 	CHECK_ERROR(cudaMalloc((void**)&d_corners, number_of_corners * sizeof(corner)));
 
 	/// find results, sort and transfer to host
-	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE >> > (d_corner_bools, d_corners, d_scores, length, image.cols);
-	CHECK_ERROR(cudaDeviceSynchronize());
+	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE, 0, stream >> > (d_corner_bools, d_corners, d_scores, length, width);
+	CHECK_ERROR(cudaStreamSynchronize(stream));
 	end = clock();
 	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-	printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
+	printf(" --- Image was processed in %f sec --- \n", time_measured);
 
 	thrust::device_ptr<corner> dev_corners(d_corners);
 
-	thrust::sort(dev_corners, dev_corners + number_of_corners, corner());
+	thrust::sort(thrust::cuda::par.on(stream), dev_corners, dev_corners + number_of_corners, corner());
 	d_corners = thrust::raw_pointer_cast(&dev_corners[0]);						/// cast pointer
-
-	CHECK_ERROR(cudaMemcpy(h_corners, d_corners, sizeof(corner)*number_of_corners, cudaMemcpyDeviceToHost));
+	CHECK_ERROR(cudaMemcpyAsync(h_corners, d_corners, sizeof(corner)*number_of_corners, cudaMemcpyDeviceToHost, stream));
+	cudaStreamSynchronize(stream);
 	return h_corners;
 }
 
-void run_on_gpu(cv::Mat image) {
-	
-	/// get dimension of image
-	int length = image.cols * image.rows;
-	preallocate_mem(image, length);
-
-	int shared_width = BLOCK_SIZE + (2 * PADDING);
-	fill_const_mem(image.cols, shared_width);
-
-	int number_of_corners;
-	corner* h_corners = get_corners_gpu(image, shared_width, length, &number_of_corners);
-
-	/// draw corners 
-	printf(" --- Result displayed by host --- \n");
-	cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
-	float start = (float)h_corners[number_of_corners - 1].score;
-	float end = h_corners[0].score;
-	float rgb_k = 255 / (end - start);
-	for (int i = 0; i < number_of_corners; i++)
-	{
-		// printf("score: %d, ", h_corners[i].score);
-		unsigned inc = (h_corners[i].score - start)*rgb_k;
-		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
-		cv::circle(image, cv::Point(h_corners[i].x, h_corners[i].y), 3, color);
-	}
-
-	/// show image
-	show_image(image);
-
+void free_all_memory() {
 	/// free all memory
-	CHECK_ERROR(cudaFree(d_img));
+	CHECK_ERROR(cudaFree(d_img_old));
+	CHECK_ERROR(cudaFree(d_img_new));
 	CHECK_ERROR(cudaFree(d_corner_bools));
 	CHECK_ERROR(cudaFree(d_scores));
 	free(h_corner_bools);
 	free(h_mask);
 	free(h_circle);
-
-	/// cudaDeviceReset must be called before exiting in order for profiling and
-	/// tracing tools such as Nsight and Visual Profiler to show complete traces.
-	CHECK_ERROR(cudaDeviceReset());
 }
-
 
 void run_on_cpu(cv::Mat image) {
 	if (mode == 1) {
@@ -293,39 +283,28 @@ void run_on_cpu(cv::Mat image) {
 		cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create(threshold, true);
 		detector->detect(image, keypointsD, cv::Mat());
 		end = clock();
-
-		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-		printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
-
-		printf(" --- Corners found: %d --- \n", keypointsD.size());
-
 		// cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
 		for (int i = 0; i < keypointsD.size(); i++) {
-			cv::circle(image, keypointsD[i].pt, 3, cv::Scalar(0, 255, 0));
+			cv::circle(image, keypointsD[i].pt, circle_size, cv::Scalar(0, 255, 0));
 		}
 	}
 	else {
-		cv::Mat gray_img = image.clone();	// create gray copy
-		cv::cvtColor(gray_img, gray_img, cv::COLOR_BGR2GRAY);
+		cv::Mat gray_img;	// create gray copy
+		cv::cvtColor(image, gray_img, cv::COLOR_BGR2GRAY);
 		h_circle = (int*)malloc(CIRCLE_SIZE * sizeof(int));
 		h_mask = (int*)malloc(MASK_SIZE*MASK_SIZE * sizeof(int));
 		unsigned *h_scores = (unsigned*)malloc(image.cols*image.rows * sizeof(int));
 		create_circle(h_circle, image.cols);
 		create_mask(h_mask, image.cols);
-		start = clock();
 		std::vector<corner> points = cpu_FAST(gray_img.data, h_scores, h_mask, h_circle, image.cols, image.rows);
-		end = clock();
 		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-		printf(" --- Image with size (%d, %d) was processed in %f sec --- \n", image.cols, image.rows, time_measured);
-
-		printf(" --- Corners found: %d --- \n", points.size());
 
 		for (int i = 0; i < points.size(); i++) {
-			cv::circle(image, cv::Point(points[i].x, points[i].y), 5, cv::Scalar(0, 255, 0));
+			cv::circle(image, cv::Point(points[i].x, points[i].y), circle_size, cv::Scalar(0, 255, 0));
 		}
 	}
 
-	cv::Size size(1280, 720);	// resize for testing
+	//cv::Size size(1280, 720);	// resize for testing
 	//resize(image, image, size);
 	//show_image(image);
 }
@@ -338,33 +317,96 @@ int main(int argc, char **argv)
 	/// load image
 	if (foto) {
 		cv::Mat image;
-		image = cv::imread(filename, 0);
-		cv::Size size(600, 800);	// resize for testing
-		resize(image, image, size);
+		cv::Mat image_gray;
+		image = cv::imread(filename, 1);
+		// cv::Size size(600, 800);	// resize for testing
+		// resize(image, image, size);
 
 		if (mode > 1) {
-			run_on_gpu(image);
+			int length = image.cols*image.rows;
+			int shared_width = BLOCK_SIZE + (2 * PADDING);
+			init_gpu(image, length, shared_width);
+			int number_of_corners;
+			cv::cvtColor(image, image_gray, cv::COLOR_BGR2GRAY);
+			allocate_new_image(image_gray, length, 0);
+			run_fast_algo(image_gray, shared_width, length, 0);
+			corner* h_corners = obtain_sorted_results(length, &number_of_corners, 0, image.cols);
+			write_circles(image, h_corners, number_of_corners);
+			cv::imwrite("output.jpg", image);
+			printf("--- output.jpg generated ---");
 		}
 		else {
 			run_on_cpu(image);
+			cv::imwrite("output.jpg", image);
+			printf("--- output.jpg generated ---");
 		}
 	}
-	if (video){
+	if (video) {
 		cv::VideoCapture cap = cv::VideoCapture(filename);
 		cv::Mat frame;
 		cap >> frame;
+		int counter = 1;
 		// Capture frame-by-frame
-		cv::VideoWriter video = cv::VideoWriter("outcpp.avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 24, frame.size(), true);
-		while (1) {
-			run_on_cpu(frame);
-			video.write(frame);
-			cap >> frame;
-			// If the frame is empty, break immediately
-			if (frame.empty())
-				break;
+		cv::VideoWriter video = cv::VideoWriter("output.avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 24, frame.size(), true);
+		start = clock();
+		if (mode < 2) {
+			while (1) {
+				run_on_cpu(frame);
+				video.write(frame);
+				cap >> frame;
+				// If the frame is empty, break immediately
+				if (frame.empty()) {
+					printf("--- Empty frame, fininshing ---");
+					break;
+				}
+				printf("--- Frame no. %d\n", counter);
+			}
 		}
+		else {
+			cv::Mat frame_gray;
+			cudaStreamCreate(&memory_s);
+			cudaStreamCreate(&work_s);
+			int length = frame.cols*frame.rows;
+			int shared_width = BLOCK_SIZE + (2 * PADDING);
+			init_gpu(frame, length, shared_width);
+			int number_of_corners;
+			cv::cvtColor(frame, frame_gray, cv::COLOR_BGR2GRAY);
+			allocate_new_image(frame_gray, length, memory_s);
+
+			while (true) {
+				cudaStreamSynchronize(memory_s);
+				run_fast_algo(frame_gray, shared_width, length, work_s);
+				/// swap pointers and allocate new frame
+				unsigned char* tmp = d_img_old;
+				d_img_old = d_img_new;
+				d_img_new = tmp;
+				
+				cap >> frame;
+				if (frame.empty()) {
+					printf("--- Empty frame, fininshing ---");
+					break;
+				}
+				cv::cvtColor(frame, frame_gray, cv::COLOR_BGR2GRAY);
+				allocate_new_image(frame_gray, length, memory_s);
+
+				corner* h_corners = obtain_sorted_results(length, &number_of_corners, work_s, frame.cols);
+
+				if (number_of_corners > 0) {
+					write_circles(frame, h_corners, number_of_corners);
+				}
+				printf("--- Frame no. %d\n", counter);
+				counter++;
+				video.write(frame);
+			}
+
+		}
+		end = clock();
+		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
+		printf("--- output.avi generated in %f seconds ---", time_measured);
 		cap.release();
 		video.release();
+		free_all_memory();
+		CHECK_ERROR(cudaDeviceReset());
 	}
 	
     return 0;
