@@ -1,3 +1,15 @@
+/**
+ * @file cuda.cuh
+ * @author Zdenek Rozsypalek (rozsyzde@fel.cvut.cz)
+ * @brief This header exposes all kernels and important methods for CUDA invocation. 
+ * @version 1.0
+ * @date 2019-01-07
+ * 
+ * @copyright Copyright (c) 2019
+ * 
+ */
+
+
 #ifndef CUDA_H
 #define CUDA_H
 
@@ -12,6 +24,7 @@
 #include <thrust/device_vector.h>
 #include <thrust/execution_policy.h>
 
+/// constants
 #define PADDING 3
 #define BLOCK_SIZE 32	/// max 32
 #define CIRCLE_SIZE 16
@@ -26,6 +39,10 @@ static void HandleError(cudaError_t error, const char *file, int line) {
 	}
 }
 
+/**
+ * @brief Structure holding info about corner
+ * 
+ */
 typedef struct corner {
 	unsigned score;
 	unsigned x;
@@ -47,7 +64,7 @@ __constant__ int d_circle[CIRCLE_SIZE];
 __constant__ int d_mask[MASK_SIZE*MASK_SIZE];
 __constant__ int d_mask_shared[MASK_SIZE*MASK_SIZE];
 
-/// kernel.cu methods
+/// kernel methods
 __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi);
 __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi);
 __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared);

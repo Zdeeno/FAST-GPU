@@ -1,6 +1,15 @@
 #include "cuda.cuh"
 
 
+/**
+ * @brief Comparator using threshold
+ * 
+ * @param pixel_val value of center pixel
+ * @param circle_val value of pixel in circle
+ * @param threshold
+ * @param sign modifies function of comparator
+ * @return char boolean
+ */
 __device__ __host__ char comparator(unsigned char pixel_val, unsigned char circle_val, int threshold, char sign) {
 	/// return boolean if true ... sign parameter gives us criterion
 	if (sign == 1) {
@@ -11,6 +20,14 @@ __device__ __host__ char comparator(unsigned char pixel_val, unsigned char circl
 	}
 }
 
+/**
+ * @brief Calculate element of score of given pixel
+ * 
+ * @param pixel_val value of center pixel
+ * @param circle_val value of pixel in circle
+ * @param threshold
+ * @return int element of score
+ */
 __device__ __host__ int get_score(int pixel_val, int circle_val, int threshold) {
 	/// returns score of circle element, positive when higher, negative when lower intensity
 	int val = pixel_val + threshold;
@@ -28,8 +45,17 @@ __device__ __host__ int get_score(int pixel_val, int circle_val, int threshold) 
 	}
 }
 
+/**
+ * @brief Recalculate 2D indexing into 1D
+ * 
+ * @param x
+ * @param y
+ * @param width width of image
+ * @param height height of image
+ * @param eliminate_padding boolean telling whether to eliminate borders of image
+ * @return int element of score
+ */
 __device__ int coords_2to1(int x, int y, int width, int height, bool eliminate_padding) {
-	/// recalculate 2d indexes into 1d array
 	if (eliminate_padding && ((x - PADDING) < 0 || (x + PADDING) >= width || (y - PADDING) < 0 || (y + PADDING) >= height)) {
 		/// cutout the borders of image, only active when eliminate_padding == true
 		return -1;
@@ -39,6 +65,13 @@ __device__ int coords_2to1(int x, int y, int width, int height, bool eliminate_p
 	}
 }
 
+/**
+ * @brief Loads circle and mask from host to device constant memory
+ * 
+ * @param h_circle circle array
+ * @param h_mask mask array
+ * @param h_mask_shared mask array for shared memory
+ */
 __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared) {
 	CHECK_ERROR(cudaMemcpyToSymbol(d_circle, h_circle, CIRCLE_SIZE * sizeof(int)));
 	CHECK_ERROR(cudaMemcpyToSymbol(d_mask, h_mask, MASK_SIZE * MASK_SIZE * sizeof(int)));
@@ -47,6 +80,15 @@ __host__ void fill_const_mem(int *h_circle, int *h_mask, int *h_mask_shared) {
 	return;
 }
 
+/**
+ * @brief Perform fast test on pixel with given id
+ * 
+ * @param input image array
+ * @param circle 
+ * @param threshold
+ * @param id pixel 1D index
+ * @return boolean telling whether it is corner candidate
+ */
 __device__ __host__ char fast_test(unsigned char *input, int *circle, int threshold, int id) {
 	unsigned char pixel = input[id];
 	unsigned char top = input[id + d_circle[0]];
@@ -66,7 +108,19 @@ __device__ __host__ char fast_test(unsigned char *input, int *circle, int thresh
 	return 0;
 }
 
-
+/**
+ * @brief Run complex test on pixel with given id
+ * 
+ * @param input image array
+ * @param scores array to output score
+ * @param corner_bools array to output whether pixel is corner or not
+ * @param circle 
+ * @param threshold
+ * @param pi
+ * @param s_id 1D index in shared memory (same as g_id when using only global memory)
+ * @param g_id 1D index in global memory
+ * @return int score of pixel with given id
+ */
 __device__ __host__ int complex_test(unsigned char *input, unsigned *scores, unsigned *corner_bools, int *circle, int threshold, int pi, int s_id, int g_id) {	
 	/// make complex test and calculate score
 	unsigned char pixel = input[s_id];
@@ -77,7 +131,8 @@ __device__ __host__ int complex_test(unsigned char *input, unsigned *scores, uns
 	char last_val = -2;
 	unsigned char consecutive = 1;
 	bool corner = false;
-	for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) /// iterate over whole circle
+	/// iterate over whole circle
+	for (size_t i = 0; i < (CIRCLE_SIZE + pi); i++) 
 	{
 		if (consecutive >= pi) {
 			corner = true;
@@ -86,7 +141,8 @@ __device__ __host__ int complex_test(unsigned char *input, unsigned *scores, uns
 			}
 		}
 		score = get_score(pixel, input[s_id + circle[i % CIRCLE_SIZE]], threshold);
-		val = (score < 0) ? -1 : (score > 0);  /// signum
+		/// signum
+		val = (score < 0) ? -1 : (score > 0); 
 		if (val != 0 && val == last_val) {
 			consecutive++;
 			score_sum += abs(score);
@@ -110,7 +166,17 @@ __device__ __host__ int complex_test(unsigned char *input, unsigned *scores, uns
 	}
 }
 
-/// kernel function with global memory
+/**
+ * @brief Kernel computing FAST algorithm using global memory
+ * 
+ * @param input image array
+ * @param scores array to output score
+ * @param corner_bools array to output whether pixel is corner or not
+ * @param width width of image
+ * @param height height of image
+ * @param threshold
+ * @param pi
+ */
 __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -147,6 +213,17 @@ __global__ void FAST_global(unsigned char *input, unsigned *scores, unsigned *co
 	return;
 }
 
+/**
+ * @brief Kernel computing FAST algorithm using shared memory
+ * 
+ * @param input image array
+ * @param scores array to output score
+ * @param corner_bools array to output whether pixel is corner or not
+ * @param width width of image
+ * @param height height of image
+ * @param threshold
+ * @param pi
+ */
 __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *corner_bools, int width, int height, int threshold, int pi)
 {
 	extern __shared__ unsigned char sData[];
@@ -213,6 +290,15 @@ __global__ void FAST_shared(unsigned char *input, unsigned *scores, unsigned *co
 	return;
 }
 
+/**
+ * @brief Kernel to obtain array of corners from scanned array
+ * 
+ * @param scanned_array array which is output of parallel scan over array of booleans
+ * @param result output corners
+ * @param scores array of scores of all pixels
+ * @param length number of pixels in image
+ * @param width width of image
+ */
 __global__ void find_corners(unsigned *scanned_array, corner *result, unsigned *scores, int length, int width) {
 	unsigned idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx < length && idx > 0) {

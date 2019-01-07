@@ -1,14 +1,13 @@
-//----------------------------------------------------------------------------------------
 /**
- * \file       FAST.cpp
- * \author     Zdenek Rozsypalek
- * \date       2018
- * \brief      CUDA FAST-n algorithm implementation
- *
- *	
- *
-*/
-//----------------------------------------------------------------------------------------
+ * @file FAST.hpp
+ * @author Zdenek Rozsypalek (rozsyzde@fel.cvut.cz)
+ * @brief Main header for this program. It has all important includes and global variables. 
+ * @version 1.0
+ * @date 2019-01-07
+ * 
+ * @copyright Copyright (c) 2019
+ * 
+ */
 
 #ifndef FAST_H
 #define FAST_H

@@ -6,6 +6,12 @@ void show_image(cv::Mat img) {
 	cv::waitKey(0);
 }
 
+/**
+ * @brief Method for debugging, prints array on device
+ * 
+ * @param device_arr array to print
+ * @param length length of array
+ */
 void print_device_array(unsigned int *device_arr, int length) {
 	int *print = (int*)malloc(length * sizeof(int));
 	CHECK_ERROR(cudaMemcpy(print, device_arr, sizeof(int)*length, cudaMemcpyDeviceToHost));
@@ -19,8 +25,13 @@ void print_device_array(unsigned int *device_arr, int length) {
 	free(print);
 }
 
+/**
+ * @brief Generate 16 incremental indexes of pixels in surrounding circle.
+ * 
+ * @param circle output array
+ * @param w width of data block (i.e. image width or shared mem width)
+ */
 void create_circle(int *circle, int w) {
-	// create surrounding circle using given width
 	circle[0] = -3 * w;
 	circle[1] = -3 * w + 1;
 	circle[2] = -2 * w + 2;
@@ -42,6 +53,12 @@ void create_circle(int *circle, int w) {
 	circle[15] = -3 * w - 1;
 }
 
+/**
+ * @brief Generate incremental indexes of mask used in non-maximal suppression
+ * 
+ * @param mask output array
+ * @param w width of data block (i.e. image width or shared mem width)
+ */
 void create_mask(int *mask, int w) {
 	// create mask with given defined mask size and width
 	int start = -(int)MASK_SIZE / 2;
@@ -57,6 +74,17 @@ void create_mask(int *mask, int w) {
 	}
 }
 
+/**
+ * @brief Naive CPU implementation of FAST algorithm
+ * 
+ * @param input image in 1D array
+ * @param scores helper array caching scores
+ * @param mask 
+ * @param circle 
+ * @param width width of input
+ * @param height height of input
+ * @return std::vector<corner> vector of found corners
+ */
 std::vector<corner> cpu_FAST(unsigned char *input, unsigned *scores, int *mask, int *circle, int width, int height) {
 	/// fast test
 	std::vector<corner> ret;
@@ -111,6 +139,12 @@ std::vector<corner> cpu_FAST(unsigned char *input, unsigned *scores, int *mask, 
 	return ret;
 }
 
+/**
+ * @brief Parsing of main arguments
+ * 
+ * @param argc 
+ * @param argv 
+ */
 void parse_args(int argc, char **argv){
 	for (size_t i = 1; i < argc; i++)
 	{
@@ -147,6 +181,12 @@ void parse_args(int argc, char **argv){
 	return;
 }
 
+/**
+ * @brief Fill constant gpu memory with mask and circle arrays
+ * 
+ * @param width width of image
+ * @param shared_width width of shared memory
+ */
 void fill_gpu_const_mem(int width, int shared_width) {
 	/// create circle and mask and copy to device
 	if (mode == 3) {
@@ -165,6 +205,13 @@ void fill_gpu_const_mem(int width, int shared_width) {
 	}
 }
 
+/**
+ * @brief Initialize GPU memory
+ * 
+ * @param image 
+ * @param length number of pixels in image
+ * @param shared_width width of shared memory
+ */
 void init_gpu(cv::Mat image, int length, int shared_width) {
 	size_t char_size = length * sizeof(unsigned char);
 	size_t int_size = length * sizeof(unsigned int);
@@ -184,6 +231,13 @@ void init_gpu(cv::Mat image, int length, int shared_width) {
 	fill_gpu_const_mem(image.cols, shared_width);
 }
 
+/**
+ * @brief Transfer image to CUDA device
+ * 
+ * @param image 
+ * @param length number of pixels in image
+ * @param stream CUDA stream for async memory copy
+ */
 void allocate_new_image(cv::Mat image, int length, cudaStream_t stream) {
 	/// create array from image and copy image to device
 	size_t char_size = length * sizeof(unsigned char);
@@ -191,6 +245,14 @@ void allocate_new_image(cv::Mat image, int length, cudaStream_t stream) {
 	CHECK_ERROR(cudaMemcpyAsync(d_img_new, h_img, char_size, cudaMemcpyHostToDevice, stream));
 }
 
+/**
+ * @brief Method encapsulating FAST algorithm on GPU
+ * 
+ * @param image 
+ * @param shared_width width of shared memory
+ * @param length number of pixels in image
+ * @param work CUDA stream for async computing
+ */
 void run_fast_algo(cv::Mat image, int shared_width, int length, cudaStream_t work) {
 	/// define grid and block sizes
 	dim3 blocks(BLOCK_SIZE, BLOCK_SIZE);
@@ -212,6 +274,13 @@ void run_fast_algo(cv::Mat image, int shared_width, int length, cudaStream_t wor
 	// CHECK_ERROR(cudaStreamSynchronize(work)); maybe you have to uncomment this
 }
 
+/**
+ * @brief Draw circles for all corners (with different color based on their score)
+ * 
+ * @param image 
+ * @param corners found corners
+ * @param number_of_corners 
+ */
 void write_circles(cv::Mat image, corner* corners, int number_of_corners) {
 	/// draw corners 
 	float start = (float)corners[number_of_corners - 1].score;
@@ -225,6 +294,15 @@ void write_circles(cv::Mat image, corner* corners, int number_of_corners) {
 	}
 }
 
+/**
+ * @brief Obtain array of corner structures from array of booleans
+ * 
+ * @param length number of pixels in image
+ * @param corners_num output number of corners here
+ * @param stream CUDA stream for async computing
+ * @param width width of image
+ * @return corner* array of corners
+ */
 corner* obtain_sorted_results(int length, int* corners_num, cudaStream_t stream, int width) {
 	/// create new CUDA array of corners with appropriate length
 	thrust::device_ptr<unsigned> dev_bools(d_corner_bools);
@@ -259,6 +337,10 @@ corner* obtain_sorted_results(int length, int* corners_num, cudaStream_t stream,
 	return h_corners;
 }
 
+/**
+ * @brief Free all allocated memory
+ * 
+ */
 void free_all_memory() {
 	/// free all memory
 	CHECK_ERROR(cudaFree(d_img_old));
@@ -270,6 +352,11 @@ void free_all_memory() {
 	free(h_circle);
 }
 
+/**
+ * @brief Method encapsulating FAST algorithm running on CPU
+ * 
+ * @param image 
+ */
 void run_on_cpu(cv::Mat image) {
 	if (mode == 1) {
 		std::vector<cv::KeyPoint> keypointsD;
@@ -338,9 +425,10 @@ int main(int argc, char **argv)
 		cv::Mat frame;
 		cap >> frame;
 		int counter = 1;
-		// Capture frame-by-frame
+		/// Capture frame-by-frame
 		cv::VideoWriter video = cv::VideoWriter("output.avi", cv::VideoWriter::fourcc('M', 'J', 'P', 'G'), 24, frame.size(), true);
 		start = clock();
+		/// CPU
 		if (mode < 2) {
 			while (1) {
 				run_on_cpu(frame);
@@ -356,6 +444,7 @@ int main(int argc, char **argv)
 			}
 			end = clock();
 		}
+		/// GPU
 		else {
 			cv::Mat frame_gray;
 			cudaStreamCreate(&memory_s);
