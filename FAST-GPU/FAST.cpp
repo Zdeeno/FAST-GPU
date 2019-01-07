@@ -202,13 +202,11 @@ void run_fast_algo(cv::Mat image, int shared_width, int length, cudaStream_t wor
 	CHECK_ERROR(cudaStreamSynchronize(work));
 	if (mode == 3) {
 		/// run kernel and measure the time
-		start = clock();
 		int sh_mem = shared_width * shared_width * sizeof(int);
 		FAST_shared << <grid, blocks, sh_mem, work >> > (img_ptr, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
 	else {
 		/// run kernel and measure the time
-		start = clock();
 		FAST_global << <grid, blocks, 0, work >> > (img_ptr, d_scores, d_corner_bools, image.cols, image.rows, threshold, pi);
 	}
 	// CHECK_ERROR(cudaStreamSynchronize(work)); maybe you have to uncomment this
@@ -251,9 +249,6 @@ corner* obtain_sorted_results(int length, int* corners_num, cudaStream_t stream,
 	/// find results, sort and transfer to host
 	find_corners << < length / (BLOCK_SIZE*BLOCK_SIZE), BLOCK_SIZE*BLOCK_SIZE, 0, stream >> > (d_corner_bools, d_corners, d_scores, length, width);
 	CHECK_ERROR(cudaStreamSynchronize(stream));
-	end = clock();
-	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-	printf(" --- Image was processed in %f sec --- \n", time_measured);
 
 	thrust::device_ptr<corner> dev_corners(d_corners);
 
@@ -279,10 +274,8 @@ void run_on_cpu(cv::Mat image) {
 	if (mode == 1) {
 		std::vector<cv::KeyPoint> keypointsD;
 
-		start = clock();
 		cv::Ptr<cv::FastFeatureDetector> detector = cv::FastFeatureDetector::create(threshold, true);
 		detector->detect(image, keypointsD, cv::Mat());
-		end = clock();
 		// cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
 		for (int i = 0; i < keypointsD.size(); i++) {
 			cv::circle(image, keypointsD[i].pt, circle_size, cv::Scalar(0, 255, 0));
@@ -297,7 +290,6 @@ void run_on_cpu(cv::Mat image) {
 		create_circle(h_circle, image.cols);
 		create_mask(h_mask, image.cols);
 		std::vector<corner> points = cpu_FAST(gray_img.data, h_scores, h_mask, h_circle, image.cols, image.rows);
-		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
 
 		for (int i = 0; i < points.size(); i++) {
 			cv::circle(image, cv::Point(points[i].x, points[i].y), circle_size, cv::Scalar(0, 255, 0));
@@ -360,7 +352,9 @@ int main(int argc, char **argv)
 					break;
 				}
 				printf("--- Frame no. %d\n", counter);
+				counter++;
 			}
+			end = clock();
 		}
 		else {
 			cv::Mat frame_gray;
@@ -401,13 +395,14 @@ int main(int argc, char **argv)
 
 		}
 		end = clock();
-		time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
-		printf("--- output.avi generated in %f seconds ---", time_measured);
 		cap.release();
 		video.release();
 		free_all_memory();
 		CHECK_ERROR(cudaDeviceReset());
 	}
+	time_measured = ((double)(end - start)) / CLOCKS_PER_SEC;
+	printf("--- output.avi generated in %f seconds ---", time_measured);
+
 	
     return 0;
 }
