@@ -3,6 +3,7 @@ FAST corner detection algorithm optimised for CUDA
 ## Usage:
 ```
 .\FAST-GPU.exe -f image.jpg -t 75 -p 9 -m 2 -i -c 5
+.\FAST-GPU.exe -f video.mp4 -t 75 -p 9 -m 2 -v -c 5
 ```
 ## Possible arguments:
 * ```-f``` &nbsp; path to input file
