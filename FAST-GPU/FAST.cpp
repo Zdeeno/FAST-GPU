@@ -290,7 +290,7 @@ void write_circles(cv::Mat image, corner* corners, int number_of_corners) {
 	{
 		unsigned inc = (corners[i].score - start)*rgb_k;
 		cv::Scalar color = cv::Scalar(0, inc, 255 - inc);
-		cv::circle(image, cv::Point(corners[i].x, corners[i].y), circle_size, color);
+		cv::circle(image, cv::Point(corners[i].x, corners[i].y), circle_size, color, 2);
 	}
 }
 
@@ -365,7 +365,7 @@ void run_on_cpu(cv::Mat image) {
 		detector->detect(image, keypointsD, cv::Mat());
 		// cv::cvtColor(image, image, cv::COLOR_GRAY2BGR);
 		for (int i = 0; i < keypointsD.size(); i++) {
-			cv::circle(image, keypointsD[i].pt, circle_size, cv::Scalar(0, 255, 0));
+			cv::circle(image, keypointsD[i].pt, circle_size, cv::Scalar(0, 255, 0), 2);
 		}
 	}
 	else {
@@ -379,7 +379,7 @@ void run_on_cpu(cv::Mat image) {
 		std::vector<corner> points = cpu_FAST(gray_img.data, h_scores, h_mask, h_circle, image.cols, image.rows);
 
 		for (int i = 0; i < points.size(); i++) {
-			cv::circle(image, cv::Point(points[i].x, points[i].y), circle_size, cv::Scalar(0, 255, 0));
+			cv::circle(image, cv::Point(points[i].x, points[i].y), circle_size, cv::Scalar(0, 255, 0), 2);
 		}
 	}
 

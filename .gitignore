@@ -3,3 +3,4 @@
 .vs
 x64
 sample.mp4
+*.vcxproj*
